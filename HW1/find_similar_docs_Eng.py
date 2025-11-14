@@ -246,7 +246,6 @@ class LSH:
         self.threshold = threshold
         
         # --- 自动计算最佳的 b 和 r ---
-        # (这部分是可选的，但非常酷)
         # 我们要找到 b 和 r (b * r = num_hashes)
         # 使得阈值 t ≈ (1/b)^(1/r) 尽可能接近我们想要的 threshold
         
@@ -336,12 +335,11 @@ class LSH:
 
 if __name__ == "__main__":
     
-    # --- Global Parameters ---
+    # Global Parameters
     K_SHINGLE_LENGTH = 10
     NUM_HASHES = 100
     SIMILARITY_THRESHOLD = 0.8 
 
-    # --- (NEW) Set the number of documents to test! ---
     # 500 will be fast (approx. 120k Jaccard comparisons)
     # 1000 will be slower (approx. 500k Jaccard comparisons)
     # 5572 is the full dataset (approx. 15.5M Jaccard comparisons)

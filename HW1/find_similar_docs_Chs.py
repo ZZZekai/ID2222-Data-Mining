@@ -5,19 +5,6 @@ import itertools
 import math
 import time  # 确保 time 库被导入
 
-# # --- 第 0 步：定义我们的文档（语料库） ---
-# # 我们使用一个字典 (dictionary) 来存储，
-# # key 是文档 ID (如 'doc1'), value 是文档的原始文本。
-# corpus = {
-#     'doc1': "The quick brown fox jumps over the lazy dog.",
-#     'doc2': "A quick brown fox jumps over the lazy dog!", # 和 doc1 非常像
-#     'doc3': "The quick brown fox jumps over the lazy cat.", # 有点像
-#     'doc4': "Python is a great programming language.",
-#     'doc5': "Data science is a field that uses Python, a great programming language.", # 和 doc4 相关
-#     'doc6': "How much wood would a woodchuck chuck if a woodchuck could chuck wood?",
-#     'doc7': "This is a completely different document about web development and javascript."
-# }
-
 # --- 第 1 步：Shingling 类 ---
 
 class Shingling:
@@ -246,7 +233,6 @@ class LSH:
         self.threshold = threshold
         
         # --- 自动计算最佳的 b 和 r ---
-        # (这部分是可选的，但非常酷)
         # 我们要找到 b 和 r (b * r = num_hashes)
         # 使得阈值 t ≈ (1/b)^(1/r) 尽可能接近我们想要的 threshold
         
