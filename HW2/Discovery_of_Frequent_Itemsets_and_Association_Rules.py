@@ -12,80 +12,68 @@ sc = spark.sparkContext # 获取 SparkContext
 TRANSACTION_FILE = 'T10I4D100K.dat'
 MIN_SUPPORT = 0.01  # 最小支持度 s
 
-# 存储所有频繁项集的字典
+# 存储所有频繁项集的字典: {k: Lk}
 all_frequent_itemsets = {}
 
 def load_data(file_path):
     """加载交易数据并返回 RDD 和总交易数"""
-    print("开始加载数据...")
+    print("--- Starting data loading ---")
     
     # RDD 操作：
     transactions_rdd = sc.textFile(file_path) \
                          .filter(lambda line: line.strip()) \
                          .map(lambda line: tuple(sorted(line.strip().split())))
     
-    # 为什么需要 .cache()？
-    # 因为 A-Priori 是迭代算法，每一轮都需要重新扫描所有交易。
-    # 缓存能将 RDD 存储在内存中，加快后续迭代的速度。
+    # 缓存 RDD 以便多次迭代使用 (A-Priori 迭代的核心优化)
     transactions_rdd.cache()
     
     num_transactions = transactions_rdd.count()
-    print(f"数据加载完成。总交易数: {num_transactions}")
+    print(f"Data loaded successfully. Total transactions: {num_transactions}")
     
     # 计算最小支持计数 (s * 总交易数)
     min_support_count = num_transactions * MIN_SUPPORT
-    print(f"最小支持计数 (min_support_count): {min_support_count:.2f}")
+    print(f"Minimum support count (min_support_count): {min_support_count:.2f}")
 
     return transactions_rdd, num_transactions, min_support_count
 
-# 主执行区调用
+# 主执行区：数据加载
 transactions_rdd, num_trans, min_support_count = load_data(TRANSACTION_FILE)
 
-# 交易 RDD 格式示例: 
-# [('Apple', 'Banana'), ('Bread', 'Milk', 'Eggs'), ...]
+# 阶段 I：频繁项集挖掘 (A-Priori 算法)
 
 # k = 1 阶段
 k = 1
 
 # C1 生成与计数：
-# 1. flatMap: 将 RDD 中的每个交易 (tuple of items) 拆分成单独的项目。
-#    示例: ('A', 'B') -> [('A', 1), ('B', 1)]
-# 2. reduceByKey: 汇总每个项目的计数。
-#    示例: [('A', 1), ('A', 1), ...] -> [('A', 2), ...]
+# 1. flatMap: 将 RDD 中的每个交易拆分成 (item, 1) 键值对。
+# 2. reduceByKey: 汇总每个项目的计数 (分布式支持计数)。
 Ck_rdd = transactions_rdd.flatMap(lambda t: [(item, 1) for item in t]) \
                          .reduceByKey(lambda a, b: a + b) 
 
-# Ck_rdd 格式: [('Milk', 500), ('Bread', 350), ...]
-
-# 筛选 L1：
+# 筛选 L1：保留支持计数 >= 最小支持计数的项集
 Lk_rdd = Ck_rdd.filter(lambda x: x[1] >= min_support_count)
 
-# Lk_rdd (仍是 Spark RDD) 格式: [('Milk', 500), ('Bread', 350), ...]
-
-# Lk_rdd 需要被收集到 Driver 端进行下一轮的连接和剪枝操作。
-# collectAsMap() 将 RDD 转换为 Python 字典 {项集: 计数}
+# Action: 收集 L1 结果到 Driver 端 (转换为 Python 字典)
 L1_dict = Lk_rdd.collectAsMap()
 
 # 转换为 frozenset 键，便于存储和下一轮使用
-# frozenset 是不可变集合，可以作为字典的键。
 L1_frozenset = {frozenset([k]): v for k, v in L1_dict.items()}
 
-# 存储结果并为下一轮准备
+# 存储 L1 并设置 Lk-1 用于下一轮连接
 all_frequent_itemsets[k] = L1_frozenset
-Lk_minus_1 = L1_frozenset # Lk-1 用于下一轮连接
+Lk_minus_1 = L1_frozenset # Lk-1 用于下一轮剪枝
 k += 1
 
-print(f"迭代 1 完成。找到 {len(L1_frozenset)} 个频繁 1-项集。")
+print(f"Iteration 1 complete. Found {len(L1_frozenset)} frequent 1-itemsets.")
 
 
-# 循环开始，从 k=2 开始
+# 迭代循环开始 (从 k=2 开始)
 while Lk_minus_1: 
 
-    print(f"\n--- 迭代 {k} 开始 ---")
+    print(f"\n--- Iteration {k} starts ---")
     
-    # 1. 广播 Lk-1
-    # 将上一轮的频繁项集广播到所有 Worker 节点，用于高效的剪枝
-    Lk_minus_1_set = set(Lk_minus_1.keys()) # 只需要项集本身，不需要计数
+    # 1. 广播 Lk-1：将上一轮的频繁项集广播到所有 Worker 节点，用于高效剪枝
+    Lk_minus_1_set = set(Lk_minus_1.keys()) 
     broadcast_Lk_minus_1 = sc.broadcast(Lk_minus_1_set)
 
     # 2. 定义 generate_and_prune 函数 (在 Worker 节点上执行)
@@ -101,10 +89,9 @@ while Lk_minus_1:
         candidates = []
         # 生成该交易中所有的 k-组合 (候选 k-项集)
         for itemset in combinations(transaction, k):
-            itemset_frozenset = frozenset(itemset) # 使用 frozenset
+            itemset_frozenset = frozenset(itemset) 
             
-            # A-Priori 剪枝核心逻辑：
-            # 检查 itemset 的所有 (k-1) 子集是否都在 Lk-1 中。
+            # A-Priori 剪枝核心逻辑：检查 itemset 的所有 (k-1) 子集是否都在 Lk-1 中。
             is_candidate = True
             for subset in combinations(itemset, k - 1):
                 if frozenset(subset) not in k_prev_frequent_set:
@@ -117,10 +104,7 @@ while Lk_minus_1:
                 
         return candidates
 
-    # ... (下一步是应用这个函数并继续计数)
-
-    # 3. 分布式生成 Ck RDD (应用 generate_and_prune)
-    # RDD 格式: [((item_a, item_b, ...), 1), ...]
+    # 3. 分布式 Ck 生成 (使用 flatMap)
     Ck_rdd = transactions_rdd.flatMap(
         lambda t: generate_and_prune(t, broadcast_Lk_minus_1.value)
     )
@@ -132,104 +116,95 @@ while Lk_minus_1:
     # 5. 筛选 Lk (应用最小支持计数)
     Lk_rdd = count_rdd.filter(lambda x: x[1] >= min_support_count)
     
-    # 6. 收集结果到 Driver 端
+    # 6. Action: 收集结果到 Driver
     Lk_dict = Lk_rdd.collectAsMap()
     
     # 7. 检查终止条件
     if not Lk_dict:
-        print(f"迭代 {k} 发现 Lk 为空，算法终止。")
+        print(f"Iteration {k} found Lk is empty. Algorithm terminates.")
         break
 
-    # 8. 存储并为下一轮准备
+    # 8. 存储 Lk 并为下一轮做准备
     Lk_frozenset = {frozenset(k): v for k, v in Lk_dict.items()}
     all_frequent_itemsets[k] = Lk_frozenset
     
     Lk_minus_1 = Lk_frozenset 
-    print(f"迭代 {k} 完成。找到 {len(Lk_frozenset)} 个频繁 {k}-项集。")
+    print(f"Iteration {k} complete. Found {len(Lk_frozenset)} frequent {k}-itemsets.")
     
     k += 1 # 准备下一轮 k+1
 
 
-
-# 阶段四：结果展示与 Spark 停止
+# 阶段四：结果展示
 if num_trans > 0:
-    # 使用在迭代过程中填充的 all_frequent_itemsets 字典
     frequent_sets_by_size = all_frequent_itemsets
 
     print("\n" + "="*80)
-    print(f"--- 最终频繁项集结果 (最小支持度 s={MIN_SUPPORT*100}%) ---")
+    print(f"--- FINAL FREQUENT ITEMSETS (Min Support s={MIN_SUPPORT*100}%) ---")
     print("="*80)
     
     total_count = sum(len(v) for v in frequent_sets_by_size.values())
-    print(f"总共找到 {total_count} 个频繁项集。")
+    print(f"Total frequent itemsets found: {total_count}.")
     
     # 按照项集大小 (k) 排序并打印
     for k, Lk in sorted(frequent_sets_by_size.items()):
-        print(f"\n### {k}-项集 (Frequent {k}-Itemsets): 共 {len(Lk)} 个")
+        print(f"\n### {k}-Itemsets (Frequent {k}-Itemsets): Total {len(Lk)} sets")
         
-        # 将 Lk (项集: 计数) 转换为列表并按计数降序排序
+        # 按支持度计数降序排序
         sorted_Lk = sorted(Lk.items(), key=lambda item: item[1], reverse=True)
         
-        # 打印所有项集或仅打印前几项以保持简洁
+        # 打印结果
         for itemset, count in sorted_Lk:
             support = count / num_trans
-            # 使用 set 格式化输出项集，支持度保留四位小数
-            print(f"  项集: {set(itemset)}, 支持度: {support:.4f} ({count} 次)")
+            # 格式化输出
+            print(f"  Itemset: {set(itemset)}, Support: {support:.4f} ({count} counts)")
         
 
 
 # 阶段五：关联规则生成 (可选任务)
 # 设定最小置信度 c
-MIN_CONFIDENCE = 0.7 # 假设为 70%，请根据需要修改
+MIN_CONFIDENCE = 0.7 
 
 def generate_association_rules(all_frequent_itemsets, min_confidence):
-    """从频繁项集中生成关联规则"""
+    """
+    从频繁项集中生成关联规则 X -> Y，并筛选出置信度 >= c 的规则。
+    """
     
     # 规则列表: [(antecedent, consequent, support, confidence, lift)]
     rules = []
     
-    # 只需要考虑 k >= 2 的频繁项集
-    # items_dict: {k: {frozenset(itemset): count}}
-    
-    # 遍历所有频繁项集 (从 2-项集开始)
+    # 只考虑 k >= 2 的频繁项集
     for k in sorted(all_frequent_itemsets.keys()):
         if k < 2:
             continue
             
-        Lk = all_frequent_itemsets[k] # 频繁 k-项集及其计数
+        Lk = all_frequent_itemsets[k] 
         
         for itemset, support_count_I in Lk.items(): # I = X U Y
             
             # 遍历项集 I 的所有非空真子集作为前提 (X)
-            # 子集长度从 1 到 k-1
             for i in range(1, k):
                 for antecedent_tuple in combinations(itemset, i):
                     X = frozenset(antecedent_tuple) # 前提 X
-                    Y = itemset - X                 # 结果 Y (I - X)
+                    Y = itemset - X                 # 结果 Y (I - X 且 X ∩ Y = ∅)
                     
-                    # 规则: X -> Y
-                    
-                    # 1. 获取前提 X 的支持计数 Count(X)
-                    # X 一定是 Lj 中的一个项集 (j = i)
+                    # 1. 获取前提 X 的支持计数 Count(X) (来自 Lj, j=len(X))
                     support_count_X = all_frequent_itemsets[len(X)].get(X)
                     
                     if support_count_X is None:
-                        # 理论上，如果 I 是频繁的，则其子集 X 必须是频繁的
-                        # 这种情况不应该发生，除非数据或逻辑有误
+                        # 理论上不会发生，因为 X 是频繁项集 I 的子集
                         continue
                         
-                    # 2. 计算置信度
+                    # 2. 计算置信度 Confidence = Count(I) / Count(X)
                     confidence = support_count_I / support_count_X
                     
                     # 3. 应用最小置信度筛选
                     if confidence >= min_confidence:
                         
-                        # 4. (可选) 计算 Lift
-                        # Lift(X -> Y) = Confidence(X -> Y) / Support(Y)
-                        # Support(Y) = Count(Y) / num_trans
+                        # 4. 计算 Lift
                         support_count_Y = all_frequent_itemsets[len(Y)].get(Y)
                         support_Y = support_count_Y / num_trans
                         
+                        # Lift = Confidence / Support(Y)
                         lift = confidence / support_Y if support_Y != 0 else 0
                         
                         rules.append({
@@ -241,10 +216,10 @@ def generate_association_rules(all_frequent_itemsets, min_confidence):
                         })
     return rules
 
-# --- 在主执行区调用和展示 ---
+# --- 主执行区：规则生成和展示 ---
 
 print("\n" + "="*80)
-print(f"--- 关联规则生成结果 (最小置信度 c={MIN_CONFIDENCE*100}%) ---")
+print(f"--- ASSOCIATION RULE GENERATION (Min Confidence c={MIN_CONFIDENCE*100}%) ---")
 print("="*80)
 
 association_rules_list = generate_association_rules(all_frequent_itemsets, MIN_CONFIDENCE)
@@ -258,12 +233,12 @@ if association_rules_list:
         
         # 格式化输出
         print(
-            f"规则: {set(rule['antecedents'])} -> {set(rule['consequents'])} | "
-            f"支持度: {support_ratio:.4f} | 置信度: {rule['confidence']:.4f} | "
-            f"提升度: {rule['lift']:.4f}"
+            f"Rule: {set(rule['antecedents'])} -> {set(rule['consequents'])} | "
+            f"Support: {support_ratio:.4f} | Confidence: {rule['confidence']:.4f} | "
+            f"Lift: {rule['lift']:.4f}"
         )
 else:
-    print("没有发现满足最小置信度要求的关联规则。")
+    print("No association rules found satisfying the minimum confidence threshold.")
 
 
 # 停止 Spark Session (释放资源)
