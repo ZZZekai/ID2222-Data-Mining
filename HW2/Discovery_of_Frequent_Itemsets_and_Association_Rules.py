@@ -160,16 +160,22 @@ if num_trans > 0:
         
 
 
-# 阶段五：关联规则生成 (可选任务)
+# 阶段五：关联规则生成 (可选任务 - 优化版，使用置信度剪枝)
 # 设定最小置信度 c
 MIN_CONFIDENCE = 0.7 
 
-def generate_association_rules(all_frequent_itemsets, min_confidence):
+def generate_association_rules_optimized(all_frequent_itemsets, num_trans, min_confidence):
     """
-    从频繁项集中生成关联规则 X -> Y，并筛选出置信度 >= c 的规则。
+    从频繁项集中生成关联规则 X -> Y，并使用置信度单调性原理进行剪枝。
+    rules = [
+        {
+            'antecedents': X, 'consequents': Y, 'support_count': count, 
+            'confidence': conf, 'lift': lift
+        }, 
+        ...
+    ]
     """
     
-    # 规则列表: [(antecedent, consequent, support, confidence, lift)]
     rules = []
     
     # 只考虑 k >= 2 的频繁项集
@@ -179,32 +185,35 @@ def generate_association_rules(all_frequent_itemsets, min_confidence):
             
         Lk = all_frequent_itemsets[k] 
         
-        for itemset, support_count_I in Lk.items(): # I = X U Y
+        # 遍历每个频繁 k-项集 I
+        for itemset, support_count_I in Lk.items(): 
             
-            # 遍历项集 I 的所有非空真子集作为前提 (X)
-            for i in range(1, k):
-                for antecedent_tuple in combinations(itemset, i):
-                    X = frozenset(antecedent_tuple) # 前提 X
-                    Y = itemset - X                 # 结果 Y (I - X 且 X ∩ Y = ∅)
+            # 初始化：H_k_results 存储当前项集 I 中所有合格的规则结果 Y (consequents)
+            # 初始时，Y 是所有长度为 1 的子集。
+            H_k_results = [frozenset([item]) for item in itemset]
+            
+            # 迭代生成规则：结果 Y 的长度从 m=1 递增到 k-1
+            for m in range(1, k):
+                
+                next_H_k_results = set()
+                
+                # 遍历当前长度 m 的合格结果 Y
+                for Y in H_k_results:
+                    X = itemset - Y # 对应的规则前提 X
                     
-                    # 1. 获取前提 X 的支持计数 Count(X) (来自 Lj, j=len(X))
+                    # 1. 获取前提 X 的支持计数 Count(X)
                     support_count_X = all_frequent_itemsets[len(X)].get(X)
                     
-                    if support_count_X is None:
-                        # 理论上不会发生，因为 X 是频繁项集 I 的子集
-                        continue
-                        
                     # 2. 计算置信度 Confidence = Count(I) / Count(X)
+                    # 因为 I 是频繁的，所以 X 也是频繁的，Count(X) > 0
                     confidence = support_count_I / support_count_X
                     
                     # 3. 应用最小置信度筛选
                     if confidence >= min_confidence:
                         
-                        # 4. 计算 Lift
+                        # **规则合格：** 立即加入结果列表
                         support_count_Y = all_frequent_itemsets[len(Y)].get(Y)
                         support_Y = support_count_Y / num_trans
-                        
-                        # Lift = Confidence / Support(Y)
                         lift = confidence / support_Y if support_Y != 0 else 0
                         
                         rules.append({
@@ -214,15 +223,35 @@ def generate_association_rules(all_frequent_itemsets, min_confidence):
                             'confidence': confidence,
                             'lift': lift
                         })
+                        
+                        # 4. 如果规则合格，则尝试生成下一层更长的结果 Y' (即 m+1)
+                        # Y' 是通过在 Y 中增加一个 X 中的元素得到的
+                        if m < k - 1:
+                            for item in X: # 用 X 中的元素来扩展 Y
+                                Y_prime = Y | frozenset([item])
+                                next_H_k_results.add(Y_prime)
+                                
+                    # 规则不合格 (剪枝)：
+                    # 如果 Confidence(X -> Y) 不合格，则任何 X' -> Y' 的规则都不再从 Y 衍生
+                    # 我们通过不将 Y 加入 next_H_k_results 来实现剪枝。
+
+                # 更新下一轮要检查的结果 Y (Y' 成为新的 Y)
+                H_k_results = next_H_k_results
+                
+                # 如果当前层没有合格的 Y，直接终止对当前 itemset 的规则生成
+                if not H_k_results:
+                    break
+            
     return rules
 
-# --- 主执行区：规则生成和展示 ---
+# --- 在主执行区调用和展示 ---
 
 print("\n" + "="*80)
 print(f"--- ASSOCIATION RULE GENERATION (Min Confidence c={MIN_CONFIDENCE*100}%) ---")
 print("="*80)
 
-association_rules_list = generate_association_rules(all_frequent_itemsets, MIN_CONFIDENCE)
+# *** 替换函数调用：使用优化后的版本 ***
+association_rules_list = generate_association_rules_optimized(all_frequent_itemsets, num_trans, MIN_CONFIDENCE)
 
 if association_rules_list:
     # 按照 Lift (提升度) 降序排序
