@@ -227,6 +227,7 @@ def generate_association_rules_optimized(all_frequent_itemsets, num_trans, min_c
                         # 4. 如果规则合格，则尝试生成下一层更长的结果 Y' (即 m+1)
                         # Y' 是通过在 Y 中增加一个 X 中的元素得到的
                         if m < k - 1:
+      
                             for item in X: # 用 X 中的元素来扩展 Y
                                 Y_prime = Y | frozenset([item])
                                 next_H_k_results.add(Y_prime)
